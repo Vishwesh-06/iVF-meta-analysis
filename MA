@@ -2,7 +2,6 @@
 # Primary model:
 #   Freeman-Tukey double-arcsine transformed proportions, random effects, REML,
 #   back-transformed with the harmonic mean of study sizes (Miller 1978).
-
 # Sensitivity model: binomial-normal GLMM with logit link (rma.glmm).
 
 # Sections
@@ -29,4 +28,183 @@
 # c. possible cohort overlap with a larger included cohort: Cappato/Letsas/Honarbakhsh/Pannone/Conte 2017 (VF only) vs Conte 2019; Peeters/Remme/Visser vs Verheul 2024
 # d. selected populations (athletes, genotype-selected, ECG-defined subgroups, S-ICD only): Cappato 2010, Ohkubo 2012, Kamakura 2013, Rudic 2017, Pannone 2023
 
+## 1. Analysis --------------------------------------------------------
+
+# Wilson score 95% CI for a single proportion (study-level display)
+wilson_ci <- function(x, n, conf = 0.95) {
+  z  <- qnorm(1 - (1 - conf) / 2)
+  p  <- x / n
+  den <- 1 + z^2 / n
+  ctr <- (p + z^2 / (2 * n)) / den
+  hw  <- z * sqrt(p * (1 - p) / n + z^2 / (4 * n^2)) / den
+  cbind(lb = pmax(0, ctr - hw), ub = pmin(1, ctr + hw))
+}
+
+# Subset the data to studies reporting an outcome
+get_outcome <- function(dat, o) {
+  d <- dat[!is.na(dat[[paste0(o, "_x")]]) & !is.na(dat[[paste0(o, "_n")]]), ]
+  d$xi <- d[[paste0(o, "_x")]]
+  d$ni <- d[[paste0(o, "_n")]]
+  d
+}
+
+# Primary model: Freeman-Tukey double arcsine, REML random effects
+fit_prop <- function(d, method = "REML") {
+  es <- escalc(measure = "PFT", xi = xi, ni = ni, data = d, add = 0, slab = study)
+  fit <- rma(yi, vi, data = es, method = method)
+  fit$ni_bt <- d$ni            # stored for the back-transformation
+  fit
+}
+
+# Back-transformation to the proportion scale (harmonic mean of study sizes)
+bt <- function(fit) list(transf = transf.ipft.hm, targs = list(ni = fit$ni_bt))
+
+# Summarise a fitted model on the proportion scale
+summ <- function(fit, label, d) {
+  p <- predict(fit, transf = bt(fit)$transf, targs = bt(fit)$targs)
+  data.frame(analysis = label, k = fit$k,
+             events = sum(d$xi), patients = sum(d$ni),
+             pooled_pct = round(100 * p$pred, 1),
+             ci_lb = round(100 * p$ci.lb, 1), ci_ub = round(100 * p$ci.ub, 1),
+             pi_lb = round(100 * p$pi.lb, 1), pi_ub = round(100 * p$pi.ub, 1),
+             I2 = round(fit$I2, 1), tau2 = round(fit$tau2, 4),
+             Q = round(fit$QE, 2), Q_p = signif(fit$QEp, 3))
+}
+
+## ---- Figure style -----------
+col_main  <- "#1F3A5F"   # navy: study squares, pooled diamond
+col_ci    <- "#2B2B2B"   # near-black: confidence-interval lines
+col_ref   <- "#8C8C8C"   # gray: pooled-estimate reference line
+col_band  <- "#F2F4F7"   # very light gray: alternate-row shading
+col_text2 <- "#555555"   # secondary text
+dash      <- "-"         # range separator (plain hyphen renders in every font)
+
+fmt_ci <- function(p, lb, ub) sprintf("%.1f (%.1f%s%.1f)", 100 * p, 100 * lb, dash, 100 * ub)
+
+draw_forest <- function(fit, d, title, xmax = 100) {
+  ci  <- wilson_ci(d$xi, d$ni)
+  ord <- order(d$year, d$study)
+  d   <- d[ord, ]; ci <- ci[ord, , drop = FALSE]
+  wts <- weights(fit)[ord]
+  k   <- nrow(d)
+  pr  <- predict(fit, transf = bt(fit)$transf, targs = bt(fit)$targs)
+  
+  # x layout (data panel spans 0..xmax; text columns sit either side)
+  s   <- xmax / 100
+  x_study <- -112 * s; x_evt <- -18 * s
+  x_est   <- xmax + 6 * s; x_wt <- xmax + 72 * s
+  y_head <- k + 1.6; y_pool <- -0.9; y_axis <- -2.0
+  
+  op <- par(mar = c(0.5, 0.5, 2.2, 0.5), family = "sans", xpd = NA)
+  on.exit(par(op))
+  plot(NA, xlim = c(x_study, x_wt), ylim = c(-5.8, k + 2.2),
+       axes = FALSE, xlab = "", ylab = "", xaxs = "i", yaxs = "i")
+  title(main = title, adj = 0, cex.main = 1.05, font.main = 2, line = 0.8)
+  
+  # alternate-row shading
+  for (i in seq(1, k, by = 2))
+    rect(x_study, k - i + 0.5, x_wt, k - i + 1.5, col = col_band, border = NA)
+  
+  # column headers and rules
+  text(x_study, y_head, "Study", adj = 0, font = 2, cex = 0.78)
+  text(x_evt,   y_head, "Events/Total", adj = 1, font = 2, cex = 0.78)
+  text(xmax / 2, y_head, "Proportion (95% CI)", font = 2, cex = 0.78)
+  text(x_est,   y_head, paste0("% (95% CI)"), adj = 0, font = 2, cex = 0.78)
+  text(x_wt,    y_head, "Weight, %", adj = 1, font = 2, cex = 0.78)
+  segments(x_study, k + 0.9, x_wt, k + 0.9, lwd = 0.8)
+  segments(x_study, y_pool + 0.6, x_wt, y_pool + 0.6, lwd = 0.5, col = col_ref)
+  
+  # pooled-estimate reference line
+  segments(100 * pr$pred, y_pool - 0.45, 100 * pr$pred, k + 0.5, lty = 2, lwd = 0.8, col = col_ref)
+  
+  # study rows
+  rows <- k:1
+  segments(100 * ci[, "lb"], rows, 100 * ci[, "ub"], rows, lwd = 0.9, col = col_ci)
+  psz <- 0.55 + 1.25 * sqrt(wts / max(wts))
+  points(100 * d$xi / d$ni, rows, pch = 15, cex = psz, col = col_main)
+  text(x_study, rows, d$study, adj = 0, cex = 0.72)
+  text(x_evt,   rows, paste0(d$xi, "/", d$ni), adj = 1, cex = 0.72)
+  text(x_est,   rows, fmt_ci(d$xi / d$ni, ci[, "lb"], ci[, "ub"]), adj = 0, cex = 0.72)
+  text(x_wt,    rows, sprintf("%.1f", wts), adj = 1, cex = 0.72)
+  
+  # pooled diamond + prediction interval
+  segments(100 * pr$pi.lb, y_pool, 100 * pr$pi.ub, y_pool, lwd = 0.9, col = col_main)
+  segments(100 * c(pr$pi.lb, pr$pi.ub), y_pool - 0.15, 100 * c(pr$pi.lb, pr$pi.ub), y_pool + 0.15,
+           lwd = 0.9, col = col_main)
+  polygon(100 * c(pr$ci.lb, pr$pred, pr$ci.ub, pr$pred),
+          y_pool + c(0, 0.38, 0, -0.38), col = col_main, border = col_main)
+  text(x_study, y_pool, "Random-effects model", adj = 0, font = 2, cex = 0.74)
+  text(x_evt,   y_pool, paste0(sum(d$xi), "/", format(sum(d$ni), big.mark = ",")),
+       adj = 1, font = 2, cex = 0.72)
+  text(x_est,   y_pool, fmt_ci(pr$pred, pr$ci.lb, pr$ci.ub), adj = 0, font = 2, cex = 0.72)
+  text(x_wt,    y_pool, "100.0", adj = 1, font = 2, cex = 0.72)
+  
+  # x-axis
+  ticks <- seq(0, xmax, by = ifelse(xmax <= 60, 10, 20))
+  segments(0, y_axis, xmax, y_axis, lwd = 0.8)
+  segments(ticks, y_axis, ticks, y_axis - 0.18, lwd = 0.8)
+  text(ticks, y_axis - 0.55, ticks, cex = 0.7)
+  text(xmax / 2, y_axis - 1.25, "Proportion of patients, %", cex = 0.75)
+  
+  # footnote: heterogeneity and prediction interval
+  pval <- ifelse(fit$QEp < 0.001, "< 0.001", sprintf("= %.3f", fit$QEp))
+  text(x_study, -4.15, adj = 0, cex = 0.68, col = col_text2,
+       bquote(paste("Heterogeneity: ", italic(I)^2, " = ", .(sprintf("%.1f%%", fit$I2)),
+                    ", ", tau^2, " = ", .(sprintf("%.3f", fit$tau2)),
+                    "; Q(", .(fit$k - 1), ") = ", .(sprintf("%.1f", fit$QE)), ", p ", .(pval))))
+  text(x_study, -4.75, adj = 0, cex = 0.68, col = col_text2,
+       "Squares: study estimates (size proportional to weight) with Wilson 95% CI.")
+  text(x_study, -5.35, adj = 0, cex = 0.68, col = col_text2,
+       sprintf("Diamond: pooled estimate (Freeman-Tukey, REML); horizontal line: 95%% prediction interval (%.1f%s%.1f%%).",
+               100 * pr$pi.lb, dash, 100 * pr$pi.ub))
+}
+
+# Bubble plot for the follow-up meta-regression
+draw_metareg <- function(mod, d,
+                         labels = c("Haissaguerre 2026" = 3, "Verheul 2024" = 1, "Conte 2019" = 1)) {
+  d   <- d[!is.na(d$fu_y), ]
+  p   <- 100 * d$xi / d$ni
+  w   <- weights(mod)
+  xs  <- seq(0, ceiling(max(d$fu_y)) + 1, length.out = 100)
+  pr  <- predict(mod, newmods = xs, transf = transf.ipft.hm, targs = list(ni = d$ni))
+  b   <- coef(summary(mod))[2, ]
+  
+  op <- par(mar = c(4.2, 4.6, 2.6, 1), family = "sans", las = 1, mgp = c(2.8, 0.6, 0),
+            tcl = -0.3)
+  on.exit(par(op))
+  plot(NA, xlim = range(xs), ylim = c(0, 100), axes = FALSE, xaxs = "i",
+       xlab = "Mean or median follow-up, y", ylab = "Recurrent malignant VA, %",
+       cex.lab = 0.9)
+  abline(h = seq(0, 100, 20), col = "#E6E6E6", lwd = 0.8)
+  axis(1, at = seq(0, max(xs), 2), cex.axis = 0.8, lwd = 0.8)
+  axis(2, at = seq(0, 100, 20), cex.axis = 0.8, lwd = 0.8)
+  polygon(c(xs, rev(xs)), 100 * c(pr$ci.lb, rev(pr$ci.ub)),
+          col = adjustcolor(col_main, 0.12), border = NA)
+  lines(xs, 100 * pr$pred, lwd = 1.6, col = col_main)
+  cexs <- 0.8 + 3.2 * sqrt(w / max(w))
+  o <- order(-w)                                  # draw big bubbles first
+  points(d$fu_y[o], p[o], pch = 21, cex = cexs[o],
+         bg = adjustcolor(col_main, 0.35), col = "white", lwd = 1.2)
+  # label a few of the largest studies (names -> text position: 1 below, 3 above, 4 right)
+  for (nm in names(labels)) {
+    i <- which(d$study == nm)
+    if (length(i)) text(d$fu_y[i], p[i], nm, pos = labels[[nm]], offset = 1.1,
+                        cex = 0.68, col = col_text2)
+  }
+  title(main = "Recurrent malignant VA by length of follow-up", adj = 0,
+        cex.main = 1.0, font.main = 2, line = 1.1)
+  mtext(sprintf("Meta-regression slope p = %.2f; bubble size proportional to study weight",
+                b["pval"]), side = 3, adj = 0, line = 0.1, cex = 0.72, col = col_text2)
+}
+
+save_fig <- function(name, width, height, draw) {
+  tiff(file.path(out_dir, paste0(name, ".tiff")), width = width, height = height,
+       units = "in", res = 600, compression = "lzw")
+  draw(); dev.off()
+  pdf_dev <- if (capabilities("cairo")) cairo_pdf else pdf
+  pdf_dev(file.path(out_dir, paste0(name, ".pdf")), width = width, height = height)
+  draw(); dev.off()
+}
+
+forest_height <- function(k) 2.0 + 0.2 * k
 
