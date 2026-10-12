@@ -208,3 +208,203 @@ save_fig <- function(name, width, height, draw) {
 
 forest_height <- function(k) 2.0 + 0.2 * k
 
+# Primary analyses --------------------------------------------------------
+results <- list()
+fits    <- list()
+for (o in names(outcomes)) {
+  if (o == "cd") next                     # cardiac death handled in section 4
+  d   <- get_outcome(ivf, o)
+  fit <- fit_prop(d)
+  fits[[o]] <- fit
+  results[[length(results) + 1]] <- summ(fit, paste("Primary:", outcomes[o]), d)
+  xm <- ifelse(o == "death", 60, 100)
+  save_fig(paste0("forest_", o), width = 7.5, height = forest_height(nrow(d)),
+           draw = function() draw_forest(fit, d, outcomes[o], xmax = xm))
+}
+primary <- do.call(rbind, results)
+print(primary)
+
+## Cardiac death: descriptive only (too few events to pool reliably) -------
+dcd <- get_outcome(ivf, "cd")
+cd_events <- sum(dcd$xi); cd_n <- sum(dcd$ni)
+cd_exact  <- binom.test(cd_events, cd_n)$conf.int
+cat(sprintf("\nCardiac death: %d/%d (%.1f%%; exact 95%% CI %.1f%%-%.1f%%) across %d studies; %d studies with zero events\n",
+            cd_events, cd_n, 100 * cd_events / cd_n, 100 * cd_exact[1], 100 * cd_exact[2],
+            nrow(dcd), sum(dcd$xi == 0)))
+# Optional (only if your team decides to pool): GLMM handles zero-event studies
+# cd_glmm <- rma.glmm(measure = "PLO", xi = xi, ni = ni, data = dcd)
+# predict(cd_glmm, transf = transf.ilogit)
+
+## Sensitivity analyses (recurrent malignant VA unless stated) -------------
+sens <- list()
+dva  <- get_outcome(ivf, "va")
+
+# Alternative model: binomial-normal GLMM (logit link) for every outcome
+for (o in setdiff(names(outcomes), "cd")) {
+  d <- get_outcome(ivf, o)
+  g <- rma.glmm(measure = "PLO", xi = xi, ni = ni, data = d)
+  p <- predict(g, transf = transf.ilogit)
+  sens[[length(sens) + 1]] <- data.frame(
+    analysis = paste("GLMM (logit):", outcomes[o]), k = g$k,
+    events = sum(d$xi), patients = sum(d$ni),
+    pooled_pct = round(100 * p$pred, 1), ci_lb = round(100 * p$ci.lb, 1),
+    ci_ub = round(100 * p$ci.ub, 1), pi_lb = round(100 * p$pi.lb, 1),
+    pi_ub = round(100 * p$pi.ub, 1), I2 = round(g$I2, 1), tau2 = round(g$tau2, 4),
+    Q = NA, Q_p = NA)
+}
+
+# Exclusion-based sensitivity analyses for each main outcome
+excl_sets <- list(
+  "Excluding studies with <10 patients"           = function(d) d[d$n_ivf >= 10, ],
+  "Excluding treatment-modified cohorts"          = function(d) d[d$treat_mod == 0, ],
+  "Strict recurrence definition (documented VF/VT or appropriate ICD therapy)" =
+    function(d) d[d$broad_def == 0, ],
+  "Excluding potentially overlapping cohorts"     = function(d) d[d$overlap == 0, ],
+  "Excluding selected populations"                = function(d) d[d$selected == 0, ],
+  "Prospective studies only"                      = function(d) d[d$prospective == 1, ],
+  "Multicenter studies only"                      = function(d) d[d$multicenter == 1, ]
+)
+for (o in c("va", "icd", "death")) {
+  for (nm in names(excl_sets)) {
+    if (grepl("^Strict", nm) && o != "va") next     # definition applies to recurrence only
+    d <- excl_sets[[nm]](get_outcome(ivf, o))
+    if (nrow(d) < 3) next
+    sens[[length(sens) + 1]] <- summ(fit_prop(d), paste0(nm, ": ", outcomes[o]), d)
+  }
+}
+sensitivity <- do.call(rbind, sens)
+print(sensitivity)
+
+# Leave-one-out (recurrent VA)
+loo <- leave1out(fits$va, transf = bt(fits$va)$transf, targs = bt(fits$va)$targs)
+loo_df <- data.frame(omitted = loo$slab,
+                     pooled_pct = round(100 * loo$estimate, 1),
+                     ci_lb = round(100 * loo$ci.lb, 1), ci_ub = round(100 * loo$ci.ub, 1),
+                     I2 = round(loo$I2, 1))
+print(loo_df)
+
+# Influence diagnostics (recurrent VA)
+inf <- influence(fits$va)
+print(inf)
+save_fig("influence_va", width = 8, height = 8, draw = function() plot(inf))
+
+## Subgroup analysis by publication era -------------------------------------
+sub <- list()
+for (o in c("va", "vf", "icd", "death")) {
+  d <- get_outcome(ivf, o)
+  for (e in levels(ivf$era)) {
+    de <- d[d$era == e, ]
+    if (nrow(de) >= 2) sub[[length(sub) + 1]] <- summ(fit_prop(de), paste0(outcomes[o], " - ", e), de)
+  }
+  es  <- escalc("PFT", xi = xi, ni = ni, data = d, add = 0)
+  mod <- rma(yi, vi, mods = ~ era, data = es, method = "REML")
+  cat(sprintf("%s: test for subgroup difference QM(1) = %.2f, p = %.3f\n",
+              outcomes[o], mod$QM, mod$QMp))
+}
+subgroups <- do.call(rbind, sub)
+print(subgroups)
+
+## Meta-regression (recurrent VA) ------------------------------------------
+es_va <- escalc("PFT", xi = xi, ni = ni, data = dva, add = 0)
+mr_year <- rma(yi, vi, mods = ~ year, data = es_va, method = "REML")
+mr_fu   <- rma(yi, vi, mods = ~ fu_y, data = es_va, method = "REML") 
+print(mr_year); print(mr_fu)
+
+# Small-sample safeguards: Knapp-Hartung adjustment + permutation test, plus a GLMM check
+set.seed(2026)                                   # makes the permutation p-value reproducible
+mr_rows <- list()
+for (cov in c("fu_y", "year")) {
+  f   <- as.formula(paste("~", cov))
+  mkh <- rma(yi, vi, mods = f, data = es_va, method = "REML", test = "knha")
+  mpm <- permutest(mkh, iter = 5000)
+  mgl <- rma.glmm(measure = "PLO", xi = xi, ni = ni, mods = f, data = dva)
+  mr_rows[[cov]] <- data.frame(
+    covariate       = ifelse(cov == "fu_y", "Follow-up duration (y)", "Publication year"),
+    k               = mkh$k,
+    slope_FT_scale  = round(coef(mkh)[2], 4),
+    p_knapp_hartung = round(mkh$pval[2], 3),
+    p_permutation   = round(mpm$pval[2], 3),
+    p_glmm          = round(mgl$pval[2], 3),
+    R2_percent      = round(mkh$R2, 1))
+}
+metareg_table <- do.call(rbind, mr_rows)
+print(metareg_table, row.names = FALSE)
+
+save_fig("metareg_va_followup", width = 6.5, height = 5,
+         draw = function() draw_metareg(mr_fu, dva))
+
+## 8. Annualized event rates (approximate) -------------------------------------
+# Person-years approximated as denominator x mean/median follow-up.
+# Report as an approximation: true person-time is rarely published.
+rate_res <- list()
+for (o in c("va", "icd", "death")) {
+  d <- get_outcome(ivf, o)
+  d <- d[!is.na(d$fu_y), ]
+  d$pt <- d$ni * d$fu_y
+  g <- rma.glmm(measure = "IRLN", xi = xi, ti = pt, data = d)
+  p <- predict(g, transf = exp)
+  rate_res[[length(rate_res) + 1]] <- data.frame(
+    outcome = outcomes[o], k = g$k, events = sum(d$xi), person_years = round(sum(d$pt)),
+    rate_per_100py = round(100 * p$pred, 2),
+    ci_lb = round(100 * p$ci.lb, 2), ci_ub = round(100 * p$ci.ub, 2))
+}
+rates <- do.call(rbind, rate_res)
+print(rates)
+
+## 9. Small-study effects ------------------------------------------------------
+draw_funnel <- function() {
+  op <- par(family = "sans", las = 1, mar = c(4.2, 4.6, 2.6, 1), mgp = c(2.8, 0.6, 0)); on.exit(par(op))
+  funnel(fits$va, xlab = "Freeman-Tukey transformed proportion", pch = 21,
+         bg = adjustcolor(col_main, 0.5), col = "white", back = "#F2F4F7", shade = "white",
+         hlines = "white", lty = 2, cex.lab = 0.9, cex.axis = 0.8)
+  title(main = "Funnel plot: recurrent malignant VA", adj = 0, cex.main = 1.0, line = 1.1)
+}
+save_fig("funnel_va", width = 6, height = 5, draw = draw_funnel)
+egger   <- regtest(fits$va, model = "rma", predictor = "sei")    # classic Egger-type test
+ss_test <- regtest(fits$va, model = "rma", predictor = "ninv")   # sample-size based (better for proportions)
+print(egger); print(ss_test)
+smallstudy_table <- data.frame(
+  test = c("Egger (standard error)", "Sample-size based (1/n)"),
+  z = round(c(egger$zval, ss_test$zval), 2),
+  p = round(c(egger$pval, ss_test$pval), 3))
+
+## 10. Diagnostic reclassification during follow-up --------------------------
+# Proportion of patients initially diagnosed with iVF who later received a specific
+# diagnosis. Denominators are the initial cohorts where reported (Visser 107,
+# Verheul 456, Haissaguerre 2026 825). Studies that removed reclassified patients
+# before analysis (Champagne, Paul, Conte 2017) or did not report it are omitted.
+# Zero counts in older studies may reflect no systematic re-evaluation: descriptive.
+reclass <- data.frame(
+  study = c("Tung 1994", "Crijns 1995", "Priori 1995", "Aizawa 1996", "Peeters 1998",
+            "Tsai 1998", "Remme 2001", "Sugao 2005", "Ohkubo 2012", "Wang 2012",
+            "Matassini 2014", "Siebermair 2016", "Visser 2016", "Honarbakhsh 2017",
+            "Chaudhry 2019", "Conte 2019", "Dalos 2019", "Stampe 2020", "Pannone 2023",
+            "Oliveira 2024", "Verheul 2024", "Haissaguerre 2026"),
+  year  = c(1994, 1995, 1995, 1996, 1998, 1998, 2001, 2005, 2012, 2012, 2014, 2016,
+            2016, 2017, 2019, 2019, 2019, 2020, 2023, 2024, 2024, 2026),
+  xi    = c(0, 0, 0, 0, 1, 0, 1, 0, 0, 0, 7, 3, 22, 0, 7, 7, 0, 3, 0, 13, 42, 73),
+  ni    = c(6, 10, 37, 8, 16, 6, 37, 3, 14, 21, 34, 35, 107, 66, 50, 278, 50, 84, 45,
+            38, 456, 825),
+  stringsAsFactors = FALSE)
+
+fit_rc <- fit_prop(reclass)
+rc_glmm <- rma.glmm(measure = "PLO", xi = xi, ni = ni, data = reclass)
+p_g <- predict(rc_glmm, transf = transf.ilogit)
+rc_post <- reclass[reclass$year >= 2015, ]
+rc_pos  <- reclass[reclass$xi > 0, ]
+reclass_table <- rbind(
+  summ(fit_rc, "Reclassification: all reporting studies", reclass),
+  data.frame(analysis = "Reclassification: GLMM (logit)", k = rc_glmm$k,
+             events = sum(reclass$xi), patients = sum(reclass$ni),
+             pooled_pct = round(100 * p_g$pred, 1), ci_lb = round(100 * p_g$ci.lb, 1),
+             ci_ub = round(100 * p_g$ci.ub, 1), pi_lb = round(100 * p_g$pi.lb, 1),
+             pi_ub = round(100 * p_g$pi.ub, 1), I2 = round(rc_glmm$I2, 1),
+             tau2 = round(rc_glmm$tau2, 4), Q = NA, Q_p = NA),
+  summ(fit_prop(rc_post), "Reclassification: studies published 2015 onward", rc_post),
+  summ(fit_prop(rc_pos),  "Reclassification: studies reporting >=1 reclassification", rc_pos))
+print(reclass_table)
+
+save_fig("forest_reclassification", width = 7.5, height = forest_height(nrow(reclass)),
+         draw = function() draw_forest(fit_rc, reclass,
+                                       "Diagnostic reclassification during follow-up", xmax = 60))
+
