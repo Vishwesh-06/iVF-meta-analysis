@@ -6,41 +6,27 @@
 # Sensitivity model: binomial-normal GLMM with logit link (rma.glmm).
 
 # Sections
-#   0. Setup
-#   1. Data (from Table 1 / Table 2)
-#   2. Helper functions
-#   3. Primary analyses + forest plots
-#   4. Cardiac death (descriptive, not pooled)
-#   5. Sensitivity analyses (incl. strict recurrence definition, leave-one-out)
-#   6. Subgroup analysis by publication era
-#   7. Meta-regression (Knapp-Hartung + permutation test, GLMM check)
-#   8. Annualized event rates (approximate person-years)
-#   9. Small-study effects (funnel plot, Egger and sample-size-based tests)
-#  10. Diagnostic reclassification during follow-up
+#  1. Primary analyses + forest plots
+#  2. Cardiac death (descriptive, not pooled)
+#  3. Sensitivity analyses (incl. strict recurrence definition, leave-one-out)
+#  4. Subgroup analysis by publication era
+#  5. Meta-regression (Knapp-Hartung + permutation test, GLMM check)
+#  6. Annualized event rates (approximate person-years)
+#  7. Small-study effects (funnel plot, Egger and sample-size-based tests)
+#  8. Diagnostic reclassification during follow-up
 
-## 0. Setup -------------------------------------------------------------------
 > library(metafor)   # meta-analysis
 > library(lme4)      # needed by rma.glmm() for the GLMM sensitivity analysis
-> 
-> out_dir <- "ivf_output"
-> dir.create(out_dir, showWarnings = FALSE)
 
-## 1. Data --------------------------------------------------------------------
 # One row per included study. NA = not reported / not included for that outcome.
 # _x = events, _n = denominator.
 # Conte 2017 & Haissaguerre 2008 contribute to recurrent VF only (overlap with Conte 2019 and Haissaguerre 2026)
 ## Flags for sensitivity analyses (1 = flagged)
-# treatment-modified / predominantly drug-treated cohorts (low ICD use)
-treat_mod   = c(0,1,0,1,1,0,0,1,0,0,1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0),
-# recurrence definition NOT restricted to documented VF/VT or appropriate ICD therapy
+# a. treatment-modified / predominantly drug-treated cohorts (low ICD use): Crijns 1995, Aizawa 1996, Mewis 1998, Belhassen 1999, Sugao 2005
+# b. recurrence definition NOT restricted to documented VF/VT or appropriate ICD therapy
 # (includes syncope or non-sustained/unconfirmed events): Priori, Aizawa 1996, Tsai,
 # Remme, Cappato. Used for the strict-definition sensitivity analysis (cf. Ozaydin 2015).
-broad_def   = c(0,0,1,1,0,0,1,0,1,0,0,0,0,1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0),
-# possible cohort overlap with a larger included cohort
-# (Cappato/Letsas/Honarbakhsh/Pannone vs Conte 2019; Peeters/Remme/Visser vs Verheul 2024)
-overlap     = c(0,0,0,0,0,1,0,0,1,0,0,0,0,1,1,0,0,0,0,0,1,1,1,0,0,0,0,0,0,1,0,0,0),
-# selected populations (athletes, genotype-selected, ECG-defined subgroups, S-ICD only)
-selected    = c(0,0,0,0,0,0,0,0,0,0,0,0,0,1,0,1,0,1,0,0,0,0,0,1,0,0,0,0,0,1,0,0,0),
+# c. possible cohort overlap with a larger included cohort: Cappato/Letsas/Honarbakhsh/Pannone/Conte 2017 (VF only) vs Conte 2019; Peeters/Remme/Visser vs Verheul 2024
+# d. selected populations (athletes, genotype-selected, ECG-defined subgroups, S-ICD only): Cappato 2010, Ohkubo 2012, Kamakura 2013, Rudic 2017, Pannone 2023
 
-# Studies contributing to recurrent VF only (overlapping cohorts): their patients are
-# already counted in the larger cohort, so they are excluded from the patient total.
+
