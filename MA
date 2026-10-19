@@ -404,7 +404,49 @@ reclass_table <- rbind(
   summ(fit_prop(rc_pos),  "Reclassification: studies reporting >=1 reclassification", rc_pos))
 print(reclass_table)
 
-save_fig("forest_reclassification", width = 7.5, height = forest_height(nrow(reclass)),
-         draw = function() draw_forest(fit_rc, reclass,
-                                       "Diagnostic reclassification during follow-up", xmax = 60))
+###############################################################################
+# Risk of bias
+
+# Link to the meta-analysis data (Aizawa 2013 is qualitative only, so not in ivf)
+ivf$rob <- rob$Overall[match(ivf$study, rob$Study)]
+stopifnot(!any(is.na(ivf$rob)))
+ivf$rob <- factor(ivf$rob, levels = c("Moderate", "High"))
+ivf$rob_mod <- as.integer(ivf$rob == "Moderate")
+cat(sprintf("Meta-analysis studies: %d moderate RoB, %d high RoB\n",
+            sum(ivf$rob_mod), sum(1 - ivf$rob_mod)))
+
+## Subgroup analysis by overall RoB -----------------------------------------
+rob_sub <- list(); rob_int <- list()
+for (o in c("va", "vf", "icd", "inapp", "death")) {
+  d <- get_outcome(ivf, o)
+  for (r in levels(ivf$rob)) {
+    dr <- d[d$rob == r, ]
+    if (nrow(dr) >= 2)
+      rob_sub[[length(rob_sub) + 1]] <- summ(fit_prop(dr), paste0(outcomes[o], " - ", r, " RoB"), dr)
+  }
+  es  <- escalc("PFT", xi = xi, ni = ni, data = d, add = 0)
+  mod <- rma(yi, vi, mods = ~ rob, data = es, method = "REML")
+  rob_int[[length(rob_int) + 1]] <- data.frame(outcome = outcomes[o],
+    k_moderate = sum(d$rob == "Moderate"), k_high = sum(d$rob == "High"),
+    QM = round(mod$QM, 2), p_interaction = round(mod$QMp, 3), row.names = NULL)
+}
+rob_subgroups   <- do.call(rbind, rob_sub)
+rob_interaction <- do.call(rbind, rob_int)
+print(rob_subgroups); print(rob_interaction)
+
+## Sensitivity: moderate-RoB studies only -----------------------------------
+rob_sens <- list()
+for (o in c("va", "icd", "death")) {
+  d <- get_outcome(ivf, o); d <- d[d$rob_mod == 1, ]
+  if (nrow(d) >= 3)
+    rob_sens[[length(rob_sens) + 1]] <- summ(fit_prop(d), paste0("Moderate RoB only: ", outcomes[o]), d)
+}
+rob_sensitivity <- do.call(rbind, rob_sens)
+print(rob_sensitivity)
+
+d_va_mod   <- get_outcome(ivf, "va"); d_va_mod <- d_va_mod[d_va_mod$rob_mod == 1, ]
+fit_va_mod <- fit_prop(d_va_mod)
+save_rob_fig("forest_va_moderate_rob", width = 7.5, height = forest_height(nrow(d_va_mod)),
+             draw = function() draw_forest(fit_va_mod, d_va_mod,
+                                           "Recurrent malignant VA: moderate risk-of-bias studies"))
 
